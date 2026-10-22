@@ -4,7 +4,7 @@ import 'dotenv/config';
 import path from 'path';
 import fs from 'fs';
 import express from 'express';
-import { app } from './server/app';
+import { app } from './server/app.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
