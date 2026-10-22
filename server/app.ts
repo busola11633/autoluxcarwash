@@ -23,7 +23,7 @@ import axios from 'axios';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import { FieldValue } from 'firebase-admin/firestore';
-import { adminReady, db, verifyIdToken } from './firebaseAdmin';
+import { adminReady, db, verifyIdToken } from './firebaseAdmin.js';
 
 export const PLATFORM_FEE_PERCENT = 7.5;
 
