@@ -1,0 +1,254 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // --- Global Safety Net ---
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helper Functions ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Auth tokens never contain custom claims. Look up roles from the DB.
+    // Caution: get() inside list queries counts towards the 10-read limit per request.
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        getUserData().role == 'admin' || 
+        (request.auth.token.email in ['oumawillis09@gmail.com', 'autoluxadmin02@gmail.com'] && request.auth.token.email_verified == true)
+      );
+    }
+
+    function isStationOwner() {
+      return isSignedIn() && getUserData().role == 'owner';
+    }
+
+    function isWorker() {
+      return isSignedIn() && getUserData().role == 'worker';
+    }
+
+    function isStationMember(stationId) {
+      return isSignedIn() && (
+        request.auth.uid == stationId ||
+        getUserData().stationId == stationId
+      );
+    }
+
+    function isCustomer() {
+      return isSignedIn() && getUserData().role == 'customer';
+    }
+
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // --- Validation Blueprints ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'name', 'email', 'role', 'createdAt']) &&
+             (data.uid == request.auth.uid || isStationOwner() || isAdmin()) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.email is string && 
+             data.role in ['owner', 'worker', 'customer', 'admin'] &&
+             (data.createdAt == request.time || data.createdAt.toMillis() > 0) &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() <= 25)) &&
+             (!('photoUrl' in data) || (data.photoUrl is string || data.photoUrl == null)) &&
+             (!('stationId' in data) || (data.stationId is string || data.stationId == null)) &&
+             (!('credits' in data) || data.credits is number) &&
+             (!('theme' in data) || data.theme in ['light', 'dark']) &&
+             (!('status' in data) || data.status in ['active', 'suspended']) &&
+             (!('plan' in data) || data.plan is string) &&
+             (!('pricing' in data) || data.pricing is map) &&
+             (!('vehicles' in data) || data.vehicles is list) &&
+             (!('updatedAt' in data) || (data.updatedAt == request.time || data.updatedAt.toMillis() > 0));
+    }
+
+    function isValidBooking(data) {
+      return data.keys().hasAll(['userId', 'businessId', 'stationId', 'slot', 'status', 'createdAt', 'vehicleInfo']) &&
+             data.userId == request.auth.uid &&
+             data.businessId is string &&
+             data.stationId is string &&
+             data.slot is timestamp &&
+             data.status in ['pending', 'confirmed', 'completed', 'canceled'] &&
+             data.vehicleInfo is string &&
+             (data.createdAt == request.time || data.createdAt.toMillis() > 0);
+    }
+
+
+    // --- Match Blocks ---
+
+    // Initial connection test
+    match /test/{id} {
+      allow read: if true;
+    }
+
+    match /users/{userId} {
+      allow read, list: if isSignedIn() && (
+        isOwner(userId) || 
+        isAdmin() || 
+        (isStationOwner() && (resource.data.stationId == request.auth.uid || resource.data.uid == request.auth.uid)) ||
+        (isWorker() && resource.data.stationId == getUserData().stationId) ||
+        (resource == null || resource.data.phone != null) 
+      );
+      allow create: if isSignedIn() && isOwner(userId) && (
+        // Normal sign-up: customers and station owners only. Nobody can make
+        // themselves an admin or attach themselves to a station.
+        (isValidUser(incoming()) && incoming().role in ['owner', 'customer'] &&
+          (!('stationId' in incoming()) || incoming().stationId == null)) ||
+        // Admin accounts only for the verified admin emails.
+        (isValidUser(incoming()) && incoming().role == 'admin' &&
+          request.auth.token.email in ['oumawillis09@gmail.com', 'autoluxadmin02@gmail.com'] &&
+          request.auth.token.email_verified == true) ||
+        // Auto-provisioned workers on first login, bound to the station that invited them.
+        (incoming().role == 'worker' &&
+          exists(/databases/$(database)/documents/authorized_workers/$(incoming().email)) &&
+          incoming().stationId == get(/databases/$(database)/documents/authorized_workers/$(incoming().email)).data.stationId)
+      );
+      // Staff can look up a single customer by ID during check-in.
+      allow get: if isSignedIn() && (isWorker() || isStationOwner());
+
+      // A user editing their own profile, or an owner editing their own staff.
+      // Money fields (credits, plan, payout) can ONLY be changed by the server
+      // (Admin SDK) or an admin, never from a browser.
+      allow update: if isSignedIn() && (
+                      isAdmin() ||
+                      (
+                        (isOwner(userId) || (isStationOwner() && existing().stationId == request.auth.uid)) &&
+                        !incoming().diff(existing()).affectedKeys().hasAny(['credits', 'plan', 'payout']) &&
+                        incoming().uid == existing().uid &&
+                        (
+                          incoming().role == existing().role ||
+                          (incoming().role == 'worker' && exists(/databases/$(database)/documents/authorized_workers/$(incoming().email)))
+                        ) &&
+                        isValidUser(incoming())
+                      ) ||
+                      // Station staff may use exactly ONE wash credit when logging a wash.
+                      (
+                        (isWorker() || isStationOwner()) &&
+                        incoming().diff(existing()).affectedKeys().hasOnly(['credits']) &&
+                        existing().credits is number && existing().credits > 0 &&
+                        incoming().credits == existing().credits - 1
+                      )
+                    );
+    }
+
+    match /authorized_workers/{id} {
+      allow get: if true;
+      allow list: if isSignedIn() && (request.auth.uid == resource.data.stationId || request.auth.token.email == id || isAdmin());
+      allow create, delete: if isSignedIn() && (isStationOwner() || isAdmin());
+    }
+
+    match /wash_businesses/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && (isStationOwner() || isAdmin()) && incoming().ownerUid == request.auth.uid;
+      allow update: if isSignedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /plans/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /subscriptions/{id} {
+      allow read: if isSignedIn() && (isOwner(resource.data.userId) || isAdmin());
+      // Created by the server after Paystack confirms payment.
+      allow create, update: if isAdmin();
+    }
+
+    match /bookings/{id} {
+      // Identity isolation
+      allow read: if isSignedIn() && (
+        isOwner(resource.data.userId) || 
+        isOwner(resource.data.workerId) ||
+        isStationMember(resource.data.stationId) ||
+        isAdmin()
+      );
+      
+      allow create: if isSignedIn() && isOwner(incoming().userId) && isValidBooking(incoming());
+      
+      allow update: if isSignedIn() && (
+        isAdmin() || 
+        // Workers can accept a job (confirmed, assigned to themselves) or complete it.
+        (isWorker() && resource.data.stationId == getUserData().stationId &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'workerId']) &&
+          (incoming().status == 'completed' ||
+           (incoming().status == 'confirmed' && incoming().workerId == request.auth.uid))) ||
+        (isOwner(existing().userId) && incoming().status == 'canceled' && incoming().diff(existing()).affectedKeys().hasOnly(['status'])) ||
+        (isStationOwner() && resource.data.stationId == request.auth.uid)
+      );
+      
+      allow delete: if isAdmin();
+    }
+
+    match /washes/{id} {
+      allow read: if isSignedIn() && (
+        isOwner(resource.data.workerId) || 
+        isStationMember(resource.data.stationId) ||
+        isAdmin() || 
+        isCustomer()
+      );
+      allow create: if isSignedIn() && (isStationMember(incoming().stationId) || isAdmin());
+      allow update: if isAdmin();
+    }
+
+    match /reviews/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && isOwner(incoming().userId);
+      allow delete: if isAdmin();
+    }
+
+    match /incentives/{id} {
+      // Allow workers to see their own incentives, and station owners/admins to see all for reports
+      allow read: if isSignedIn() && (isOwner(resource.data.workerId) || isStationOwner() || isAdmin());
+      // For MVP, allow workers to log their own job incentives as triggered in App.tsx
+      allow create: if isSignedIn() && (isWorker() || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /withdrawals/{id} {
+      allow read: if isSignedIn() && (isOwner(resource.data.ownerId) || isAdmin());
+      allow create: if isSignedIn() && isOwner(incoming().ownerId) && 
+                    incoming().keys().hasAll(['ownerId', 'amount', 'bankName', 'status', 'timestamp']) &&
+                    incoming().amount is number && incoming().amount > 0 &&
+                    incoming().status == 'pending' &&
+                    incoming().timestamp == request.time;
+      // Admin marks a request as paid from the Withdrawal Settlement Queue.
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /marketplace_items/{id} {
+      allow read: if true;
+      allow write: if isAdmin() || (isStationOwner() && (existing() == null || existing().ownerUid == request.auth.uid) && (incoming() == null || incoming().ownerUid == request.auth.uid));
+    }
+
+    match /orders/{id} {
+      allow read: if isSignedIn() && (
+        isOwner(resource.data.userId) || isAdmin() ||
+        (isStationOwner() && resource.data.ownerId == request.auth.uid)
+      );
+      // Created by the server after Paystack confirms payment.
+      allow create: if isAdmin();
+      allow update: if isAdmin() || (isStationOwner() && resource.data.ownerId == request.auth.uid &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['status']));
+    }
+
+    // Payment intents: server only (Admin SDK). No browser access at all.
+    match /payments/{id} {
+      allow read, write: if false;
+    }
+  }
+}
