@@ -1,10 +1,10 @@
-   {
-     "projectId": "autolux-carwash-924b8",
-     "appId": "PASTE appId",
-     "apiKey": "PASTE apiKey",
-     "authDomain": "autolux-carwash-924b8.firebaseapp.com",
-     "firestoreDatabaseId": "(default)",
-     "storageBucket": "PASTE storageBucket",
-     "messagingSenderId": "PASTE messagingSenderId",
-     "measurementId": ""
-   }
+{
+  "projectId": "autolux-carwash-924b8",
+  "appId": "1:773768543871:web:71ab852c079b078cad094a",
+  "apiKey": "AIzaSyD4W1dMyETSz2-Ddzz1VJFK44wDQVVykws",
+  "authDomain": "autolux-carwash-924b8.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "autolux-carwash-924b8.firebasestorage.app",
+  "messagingSenderId": "773768543871",
+  "measurementId": "G-EX8NQ3W1H3"
+}
